@@ -1,69 +1,246 @@
 const mineflayer = require('mineflayer');
 
-function createBot() {
-    const bot = mineflayer.createBot({
-        host: 'Qu4ntumPenguin.aternos.me', // <--- REEMPLAZA ESTO POR LA IP DE TU SERVER
-        port: 28663,                // Puerto predeterminado de Minecraft
-        username: 'Raboot_356',    // Nombre genérico del bot/NPC dentro del juego
-        version: false             // Autodetecta la versión exacta del servidor (1.8 a 1.21+)
-    });
+let bot = null;
+let reconnectTimeout = null;
+let routineTimeout = null;
+let shuttingDown = false;
 
-    bot.on('spawn', () => {
-        console.log(`[NPC] El bot ha aparecido correctamente en el mapa.`);
-        // Si tu servidor No-Premium requiere contraseña, descomenta la línea de abajo:
-        // setTimeout(() => bot.chat('/login erickJKN'), 4000);
-    });
+const HOST = 'Qu4ntumPenguin.aternos.me';
+const PORT = 28663;
+const USERNAME = 'Raboot_356';
 
-    bot.on('login', () => {
-        console.log(`[NPC] Conexión establecida con el servidor de Minecraft.`);
-    });
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    // Rutina automatizada del NPC: Buscar cofre, interactuar, cerrar y saltar (Cada 45 segundos)
-    setInterval(async () => {
-        if (!bot || !bot.entity) return;
+function startRoutine(currentBot) {
+    if (shuttingDown) return;
+
+    async function routine() {
+        if (shuttingDown) return;
+        if (!bot || bot !== currentBot) return;
+        if (!bot.entity) {
+            routineTimeout = setTimeout(routine, 45000);
+            return;
+        }
 
         try {
-            // 1. Localizar el bloque de cofre en un radio de 5 bloques
-            const chestBlock = bot.findBlock({
-                matching: bot.registry.blocksByName.chest.id,
-                maxDistance: 5
-            });
+            console.log('[NPC] Iniciando ciclo...');
 
-            if (chestBlock) {
-                console.log('[NPC] Interactuando con el contenedor cercano...');
-                
-                // 2. Abrir el contenedor (genera la animación y sonido físico en el servidor)
-                const chest = await bot.openChest(chestBlock);
-                console.log('[NPC] Contenedor abierto.');
-                
-                // Mantener la interfaz abierta durante 2 segundos simulando actividad de inventario
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // 3. Cerrar la interfaz del contenedor
-                chest.close();
-                console.log('[NPC] Contenedor cerrado.');
+            console.log(
+                `[NPC] Posición: X=${bot.entity.position.x.toFixed(2)} ` +
+                `Y=${bot.entity.position.y.toFixed(2)} ` +
+                `Z=${bot.entity.position.z.toFixed(2)}`
+            );
+
+            const chestId = bot.registry.blocksByName.chest?.id;
+
+            if (!chestId) {
+                console.log('[NPC] No se encontró el bloque chest en el registro.');
             } else {
-                console.log('[NPC] Aviso: No se detectó ningún contenedor válido cerca.');
+                const chestBlock = bot.findBlock({
+                    matching: chestId,
+                    maxDistance: 5
+                });
+
+                if (chestBlock) {
+                    console.log('[NPC] Cofre encontrado.');
+
+                    try {
+                        const chest = await bot.openChest(chestBlock);
+
+                        console.log('[NPC] Cofre abierto.');
+
+                        await sleep(2000);
+
+                        chest.close();
+
+                        console.log('[NPC] Cofre cerrado.');
+                    } catch (err) {
+                        console.log(
+                            `[NPC] Error interactuando con el cofre: ${err.message}`
+                        );
+                    }
+                } else {
+                    console.log(
+                        '[NPC] No se detectó ningún cofre en un radio de 5 bloques.'
+                    );
+                }
             }
 
-            // 4. Ejecutar acción de salto físico para evitar la inactividad (Anti-AFK)
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 500);
-            console.log('[NPC] Acción anti-inactividad completada con éxito.');
+            /*
+             * IMPORTANTE:
+             * No hacemos ningún movimiento todavía.
+             *
+             * El error del servidor es:
+             *
+             * Invalid move player packet received
+             *
+             * Por eso primero comprobamos si el bot puede permanecer
+             * conectado sin enviar saltos/movimientos artificiales.
+             */
+
+            console.log('[NPC] Ciclo terminado sin movimiento artificial.');
 
         } catch (err) {
-            console.log(`[NPC] Error en el ciclo de ejecución: ${err.message}`);
+            console.log(`[NPC] Error en el ciclo: ${err.message}`);
         }
-    }, 45000);
 
-    // Sistema de auto-reconexión segura tras expulsiones o reinicios del servidor
-    bot.on('end', (reason) => {
-        console.log(`[NPC] Conexión finalizada por: ${reason}. Reintentando en 25 segundos...`);
-        setTimeout(createBot, 25000);
+        if (!shuttingDown && bot === currentBot) {
+            routineTimeout = setTimeout(routine, 45000);
+        }
+    }
+
+    routineTimeout = setTimeout(routine, 45000);
+}
+
+function createBot() {
+    if (shuttingDown) return;
+
+    console.log('[NPC] Creando conexión...');
+
+    const options = {
+        host: HOST,
+        port: PORT,
+        username: USERNAME,
+
+        /*
+         * false permite que Mineflayer detecte la versión.
+         */
+        version: false,
+
+        /*
+         * Evita intentar autenticar el bot mediante Microsoft.
+         * Si tu servidor requiere otro sistema de autenticación,
+         * habrá que configurarlo aparte.
+         */
+        auth: 'offline'
+    };
+
+    console.log('[NPC] Configuración:');
+    console.log(`[NPC] Host: ${HOST}`);
+    console.log(`[NPC] Puerto: ${PORT}`);
+    console.log(`[NPC] Usuario: ${USERNAME}`);
+    console.log(`[NPC] Versión: autodetect`);
+
+    const currentBot = mineflayer.createBot(options);
+
+    bot = currentBot;
+
+    currentBot.once('login', () => {
+        console.log('[NPC] Login recibido correctamente.');
+
+        try {
+            console.log(
+                `[NPC] Protocolo utilizado: ${currentBot.version}`
+            );
+        } catch (err) {
+            console.log('[NPC] No se pudo obtener la versión.');
+        }
     });
 
-    bot.on('error', (err) => console.log(`[NPC] Error crítico de red detectado: ${err}`));
+    currentBot.once('spawn', () => {
+        console.log('[NPC] Spawn recibido.');
+
+        if (currentBot.entity) {
+            console.log(
+                `[NPC] Posición inicial: ` +
+                `X=${currentBot.entity.position.x.toFixed(2)} ` +
+                `Y=${currentBot.entity.position.y.toFixed(2)} ` +
+                `Z=${currentBot.entity.position.z.toFixed(2)}`
+            );
+        }
+
+        /*
+         * Esperamos 10 segundos después del spawn antes de comenzar
+         * cualquier actividad.
+         */
+        console.log(
+            '[NPC] Esperando 10 segundos antes de iniciar la rutina...'
+        );
+
+        startRoutine(currentBot);
+    });
+
+    currentBot.on('kicked', (reason) => {
+        console.log('[NPC] KICK recibido del servidor:');
+        console.log(reason);
+    });
+
+    currentBot.on('error', (err) => {
+        console.log('[NPC] ERROR:');
+        console.log(err);
+    });
+
+    currentBot.on('end', (reason) => {
+        console.log('[NPC] Conexión finalizada.');
+        console.log(`[NPC] Razón: ${reason}`);
+
+        /*
+         * Cancelamos la rutina perteneciente a esta instancia.
+         */
+        if (routineTimeout) {
+            clearTimeout(routineTimeout);
+            routineTimeout = null;
+        }
+
+        if (bot === currentBot) {
+            bot = null;
+        }
+
+        if (shuttingDown) return;
+
+        if (reconnectTimeout) {
+            return;
+        }
+
+        console.log('[NPC] Reconectando en 25 segundos...');
+
+        reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            createBot();
+        }, 25000);
+    });
+
+    /*
+     * Diagnóstico de movimiento.
+     *
+     * No modificamos el movimiento aquí.
+     * Solamente mostramos información para saber si el servidor
+     * expulsa al bot inmediatamente después de recibir movimiento.
+     */
+    currentBot.on('move', () => {
+        if (!currentBot.entity) return;
+
+        console.log(
+            `[NPC] Movimiento detectado: ` +
+            `X=${currentBot.entity.position.x.toFixed(3)} ` +
+            `Y=${currentBot.entity.position.y.toFixed(3)} ` +
+            `Z=${currentBot.entity.position.z.toFixed(3)}`
+        );
+    });
 }
+
+process.on('SIGINT', () => {
+    console.log('[NPC] Cerrando bot...');
+
+    shuttingDown = true;
+
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
+    if (routineTimeout) {
+        clearTimeout(routineTimeout);
+        routineTimeout = null;
+    }
+
+    if (bot) {
+        bot.quit('Bot shutdown');
+    }
+
+    setTimeout(() => process.exit(0), 1000);
+});
 
 createBot();
